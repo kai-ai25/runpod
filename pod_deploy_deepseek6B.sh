@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-HF_TOKEN="your_huggingface_token_here"  # Replace with your actual token
+HF_TOKEN=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  # Replace with your actual token
 MODEL_NAME="deepseek-ai/deepseek-llm-6.7b"  # Or "deepseek-ai/deepseek-coder-6.7b-instruct"
 LOCAL_MODEL_DIR="/workspace/huggingface/deepseek-6.7b"
 API_PORT=8000
@@ -97,25 +97,12 @@ download_model() {
     fi
 
     echo "⬇️ Downloading DeepSeek-6.7B (this may take 10-30 mins)..." | tee -a "$LOG_FILE"
+
+    
+        # New download method without callback
     python3 - <<EOF 2>&1 | tee -a "$LOG_FILE"
 from huggingface_hub import snapshot_download
-from tqdm.auto import tqdm
 import os
-
-class TqdmProgress:
-    def __init__(self):
-        self.pbar = None
-    
-    def __call__(self, **kwargs):
-        if self.pbar is None:
-            self.pbar = tqdm(
-                total=kwargs.get("total", 0),
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                desc="Downloading DeepSeek-6.7B"
-            )
-        self.pbar.update(kwargs.get("advance", 0))
 
 try:
     snapshot_download(
@@ -123,14 +110,19 @@ try:
         local_dir="$LOCAL_MODEL_DIR",
         local_dir_use_symlinks=False,
         resume_download=True,
-        token=os.environ.get("HF_TOKEN"),
-        callback=TqdmProgress()
+        token=os.environ.get("HF_TOKEN")
     )
     print("✅ Download successful!")
 except Exception as e:
     print(f"❌ Download failed: {str(e)}")
     exit(1)
 EOF
+
+    # Verify download
+    if [ ! -f "$LOCAL_MODEL_DIR/config.json" ]; then
+        echo "❌ Model files not found - download may have failed" | tee -a "$LOG_FILE"
+        exit 1
+    fi
 }
 
 # --- Service Setup (Optimized for 6.7B) ---
