@@ -207,12 +207,14 @@ def respond(message, history):
     return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 gr.ChatInterface(respond).launch(server_port=$UI_PORT)
-EOT
+
     else
         echo "🔍 Using existing gradio_ui.py (customizations preserved)" | tee -a "$LOG_FILE"
     fi
-EOT
+
 }
+
+EOT
 
 # --- Service Launch ---
 launch_services() {
