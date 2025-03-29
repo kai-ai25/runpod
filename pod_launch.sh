@@ -64,12 +64,11 @@ install_dependencies() {
         pip install --upgrade pip
         pip install \
             torch transformers accelerate bitsandbytes \
-            fastapi uvicorn gradio huggingface-hub \
-            tqdm  # For progress bars
+            fastapi uvicorn gradio huggingface-hub
     } >> "$LOG_FILE" 2>&1
 }
 
-# --- Model Download with Progress Bar ---
+# --- Model Download ---
 download_model() {
     echo "🔐 Authenticating and downloading model..." | tee -a "$LOG_FILE"
     
@@ -97,43 +96,12 @@ download_model() {
     for ((i=1; i<=retries; i++)); do
         echo "⬇️ Download attempt $i/$retries..." | tee -a "$LOG_FILE"
         
-        # Python script with progress bar
-        if python3 - <<EOF 2>&1 | tee -a "$LOG_FILE"
-from huggingface_hub import snapshot_download
-from tqdm.auto import tqdm
-import os
-
-class TqdmProgress:
-    def __init__(self):
-        self.pbar = None
-    
-    def __call__(self, **kwargs):
-        if self.pbar is None:
-            self.pbar = tqdm(
-                total=kwargs.get("total", 0),
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                desc="Downloading model"
-            )
-        self.pbar.update(kwargs.get("advance", 0))
-
-try:
-    snapshot_download(
-        repo_id="$MODEL_NAME",
-        local_dir="$LOCAL_MODEL_DIR",
-        local_dir_use_symlinks=False,
-        resume_download=True,
-        max_workers=4,
-        token=os.environ.get("HF_TOKEN"),
-        callback=TqdmProgress()
-    )
-    print("✅ Download successful!")
-except Exception as e:
-    print(f"❌ Download failed: {str(e)}")
-    exit(1)
-EOF
-        then
+        if huggingface-cli download $MODEL_NAME \
+            --local-dir "$LOCAL_MODEL_DIR" \
+            --local-dir-use-symlinks False \
+            --resume-download \
+            --max-workers 4 >> "$LOG_FILE" 2>&1; then
+            echo "✅ Download successful!" | tee -a "$LOG_FILE"
             return 0
         fi
         
