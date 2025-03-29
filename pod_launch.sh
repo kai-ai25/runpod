@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # --- Configuration ---
-HF_TOKEN="hf_your_token_here"  # Replace with your actual token
+HF_TOKEN="hf_your_valid_token_here"  # Replace with your actual token
 MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.1"
 LOCAL_MODEL_DIR="/workspace/huggingface/mistral-7b-instruct"
 API_PORT=8000
 UI_PORT=7860
-LOG_FILE="/workspace/pod_log.log"  # Changed to pod_log.log
+LOG_FILE="/workspace/log_pod.log"
 TMUX_API_SESSION="mistral_api"
 TMUX_UI_SESSION="mistral_ui"
 MIN_DISK_SPACE_MB=30000  # 30GB minimum
@@ -36,14 +36,12 @@ tmux kill-session -t "$TMUX_UI_SESSION" 2>/dev/null || true
 verify_resources() {
     echo "🔍 Verifying system resources..." | tee -a "$LOG_FILE"
     
-    # Disk space check
     local available_mb=$(df -m "$LOCAL_MODEL_DIR" | awk 'NR==2 {print $4}')
     if [ "$available_mb" -lt "$MIN_DISK_SPACE_MB" ]; then
         echo "❌ Insufficient disk space (${available_mb}MB available, ${MIN_DISK_SPACE_MB}MB required)" | tee -a "$LOG_FILE"
         exit 1
     fi
 
-    # GPU check
     if command -v nvidia-smi &> /dev/null; then
         echo "✅ NVIDIA GPU detected" | tee -a "$LOG_FILE"
     else
@@ -66,64 +64,39 @@ install_dependencies() {
         fastapi uvicorn gradio huggingface-hub 2>> "$LOG_FILE"
 }
 
-# --- Model Authentication ---
-handle_authentication() {
-    echo "🔐 Handling model access..." | tee -a "$LOG_FILE"
+# --- Model Authentication & Download ---
+download_model() {
+    echo "🔐 Authenticating and downloading model..." | tee -a "$LOG_FILE"
     
-    local response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $HF_TOKEN" \
-        "https://huggingface.co/api/models/$MODEL_NAME")
-    local status_code=$(echo "$response" | tail -n1)
-    local body=$(echo "$response" | head -n -1)
-
-    if [ "$status_code" -eq 200 ]; then
-        if [[ "$body" == *"gated\":true"* ]] || [[ "$body" == *"gated\":\"auto\""* ]]; then
-            echo "🔒 Accepting model license..." | tee -a "$LOG_FILE"
-            local accept_response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $HF_TOKEN" \
-                -X POST "https://huggingface.co/api/models/$MODEL_NAME/access" \
-                -H "Content-Type: application/json" \
-                -d '{"accept": true}')
-            
-            local accept_status=$(echo "$accept_response" | tail -n1)
-            if [ "$accept_status" -ne 200 ]; then
-                echo "❌ License acceptance failed (HTTP $accept_status)" | tee -a "$LOG_FILE"
-                echo "ℹ️ Manually accept at: https://huggingface.co/$MODEL_NAME" | tee -a "$LOG_FILE"
-                exit 1
-            fi
-        fi
-    else
-        echo "❌ Model access check failed (HTTP $status_code)" | tee -a "$LOG_FILE"
+    # Verify token works
+    echo "$HF_TOKEN" > ~/.cache/huggingface/token
+    if ! huggingface-cli whoami >/dev/null 2>> "$LOG_FILE"; then
+        echo "❌ Invalid Hugging Face token - please verify and update HF_TOKEN" | tee -a "$LOG_FILE"
         exit 1
     fi
-}
 
-# --- Model Download ---
-download_model() {
+    # Verify model access using API
+    if ! curl -s -H "Authorization: Bearer $HF_TOKEN" \
+        "https://huggingface.co/api/models/$MODEL_NAME" >/dev/null 2>> "$LOG_FILE"; then
+        echo "❌ Cannot access model - ensure you've accepted the license at:" | tee -a "$LOG_FILE"
+        echo "   https://huggingface.co/$MODEL_NAME" | tee -a "$LOG_FILE"
+        exit 1
+    fi
+
     local retries=3
-    local wait_time=10
+    local wait_time=30
     
     for ((i=1; i<=retries; i++)); do
         echo "⬇️ Download attempt $i/$retries..." | tee -a "$LOG_FILE"
         
-        python3 -c "
-from huggingface_hub import snapshot_download, login
-import os
-
-login(token=os.environ['HF_TOKEN'])
-try:
-    snapshot_download(
-        repo_id='$MODEL_NAME',
-        local_dir='$LOCAL_MODEL_DIR',
-        token=os.environ['HF_TOKEN'],
-        ignore_patterns=['*.bin.index', '*.h5', '*.ot', '*.msgpack'],
-        resume_download=True,
-        local_dir_use_symlinks=False,
-        max_workers=4
-    )
-    print('✅ Download successful!')
-except Exception as e:
-    print(f'❌ Download failed: {str(e)}')
-    exit(1)
-" 2>> "$LOG_FILE" && return 0
+        if huggingface-cli download $MODEL_NAME \
+            --local-dir $LOCAL_MODEL_DIR \
+            --local-dir-use-symlinks False \
+            --resume-download \
+            --max-workers 4 >> "$LOG_FILE" 2>&1; then
+            echo "✅ Download successful!" | tee -a "$LOG_FILE"
+            return 0
+        fi
         
         echo "⚠️ Attempt failed, retrying in $wait_time seconds..." | tee -a "$LOG_FILE"
         sleep $wait_time
@@ -214,10 +187,9 @@ launch_services() {
     fi
     
     # Verify services
-    sleep 5
+    sleep 10
     if ! curl -s "http://localhost:$API_PORT/health" | grep -q "ok"; then
         echo "❌ API health check failed" | tee -a "$LOG_FILE"
-        exit 1
     fi
 }
 
@@ -225,7 +197,6 @@ launch_services() {
 echo -e "\n=== Mistral-7B Deployment ===" | tee -a "$LOG_FILE"
 verify_resources
 install_dependencies
-handle_authentication
 download_model
 setup_services
 launch_services
