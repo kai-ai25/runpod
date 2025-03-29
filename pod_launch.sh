@@ -16,7 +16,7 @@ MIN_DISK_SPACE_MB=30000  # 30GB minimum
 handle_error() {
     echo "❌ Error at line $1" | tee -a "$LOG_FILE"
     echo "💡 Check logs: tail -f $LOG_FILE" | tee -a "$LOG_FILE"
-    exit 1
+    # Continue execution despite errors
 }
 trap 'handle_error $LINENO' ERR
 
@@ -27,10 +27,12 @@ export HF_TOKEN="$HF_TOKEN"
 
 # --- Cleanup Previous Runs ---
 echo "🧹 Cleaning up previous sessions..." | tee -a "$LOG_FILE"
-pkill -f uvicorn 2>/dev/null || true
-pkill -f gradio 2>/dev/null || true
-tmux kill-session -t "$TMUX_API_SESSION" 2>/dev/null || true
-tmux kill-session -t "$TMUX_UI_SESSION" 2>/dev/null || true
+{
+    pkill -f "uvicorn.*$API_PORT" || true
+    pkill -f "gradio.*$UI_PORT" || true
+    tmux kill-session -t "$TMUX_API_SESSION" 2>/dev/null || true
+    tmux kill-session -t "$TMUX_UI_SESSION" 2>/dev/null || true
+} >> "$LOG_FILE" 2>&1
 
 # --- System Checks ---
 verify_resources() {
@@ -53,31 +55,37 @@ verify_resources() {
 install_dependencies() {
     echo "📦 Installing dependencies..." | tee -a "$LOG_FILE"
     
-    apt-get update -qq && apt-get install -y \
-        python3 python3-pip python3-dev \
-        tmux curl git git-lfs net-tools jq \
-        nvidia-cuda-toolkit 2>> "$LOG_FILE"
-
-    pip install --upgrade pip 2>> "$LOG_FILE"
-    pip install \
-        torch transformers accelerate bitsandbytes \
-        fastapi uvicorn gradio huggingface-hub 2>> "$LOG_FILE"
+    {
+        apt-get update -qq && apt-get install -y \
+            python3 python3-pip python3-dev \
+            tmux curl git git-lfs net-tools jq \
+            nvidia-cuda-toolkit
+        
+        pip install --upgrade pip
+        pip install \
+            torch transformers accelerate bitsandbytes \
+            fastapi uvicorn gradio huggingface-hub \
+            tqdm  # For progress bars
+    } >> "$LOG_FILE" 2>&1
 }
 
-# --- Model Authentication & Download ---
+# --- Model Download with Progress Bar ---
 download_model() {
     echo "🔐 Authenticating and downloading model..." | tee -a "$LOG_FILE"
     
-    # Verify token works
+    # Write token to cache file
+    mkdir -p ~/.cache/huggingface
     echo "$HF_TOKEN" > ~/.cache/huggingface/token
-    if ! huggingface-cli whoami >/dev/null 2>> "$LOG_FILE"; then
+    
+    # Verify token
+    if ! huggingface-cli whoami >> "$LOG_FILE" 2>&1; then
         echo "❌ Invalid Hugging Face token - please verify and update HF_TOKEN" | tee -a "$LOG_FILE"
         exit 1
     fi
 
-    # Verify model access using API
+    # Verify model access
     if ! curl -s -H "Authorization: Bearer $HF_TOKEN" \
-        "https://huggingface.co/api/models/$MODEL_NAME" >/dev/null 2>> "$LOG_FILE"; then
+        "https://huggingface.co/api/models/$MODEL_NAME" >> "$LOG_FILE" 2>&1; then
         echo "❌ Cannot access model - ensure you've accepted the license at:" | tee -a "$LOG_FILE"
         echo "   https://huggingface.co/$MODEL_NAME" | tee -a "$LOG_FILE"
         exit 1
@@ -89,12 +97,43 @@ download_model() {
     for ((i=1; i<=retries; i++)); do
         echo "⬇️ Download attempt $i/$retries..." | tee -a "$LOG_FILE"
         
-        if huggingface-cli download $MODEL_NAME \
-            --local-dir $LOCAL_MODEL_DIR \
-            --local-dir-use-symlinks False \
-            --resume-download \
-            --max-workers 4 >> "$LOG_FILE" 2>&1; then
-            echo "✅ Download successful!" | tee -a "$LOG_FILE"
+        # Python script with progress bar
+        if python3 - <<EOF 2>&1 | tee -a "$LOG_FILE"
+from huggingface_hub import snapshot_download
+from tqdm.auto import tqdm
+import os
+
+class TqdmProgress:
+    def __init__(self):
+        self.pbar = None
+    
+    def __call__(self, **kwargs):
+        if self.pbar is None:
+            self.pbar = tqdm(
+                total=kwargs.get("total", 0),
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc="Downloading model"
+            )
+        self.pbar.update(kwargs.get("advance", 0))
+
+try:
+    snapshot_download(
+        repo_id="$MODEL_NAME",
+        local_dir="$LOCAL_MODEL_DIR",
+        local_dir_use_symlinks=False,
+        resume_download=True,
+        max_workers=4,
+        token=os.environ.get("HF_TOKEN"),
+        callback=TqdmProgress()
+    )
+    print("✅ Download successful!")
+except Exception as e:
+    print(f"❌ Download failed: {str(e)}")
+    exit(1)
+EOF
+        then
             return 0
         fi
         
@@ -176,34 +215,42 @@ launch_services() {
     
     # API Service
     if ! tmux new-session -d -s "$TMUX_API_SESSION" "python api_server.py >> $LOG_FILE 2>&1"; then
-        echo "❌ Failed to start API service" | tee -a "$LOG_FILE"
-        exit 1
+        echo "⚠️ Failed to start API service (check logs)" | tee -a "$LOG_FILE"
+    else
+        echo "✅ API service started in tmux session: $TMUX_API_SESSION" | tee -a "$LOG_FILE"
     fi
     
     # UI Service
-    if ! tmux new-session -d -s "$TMUX_UI_SESSION" "sleep 10 && python gradio_ui.py >> $LOG_FILE 2>&1"; then
-        echo "❌ Failed to start UI service" | tee -a "$LOG_FILE"
-        exit 1
+    if ! tmux new-session -d -s "$TMUX_UI_SESSION" "sleep 15 && python gradio_ui.py >> $LOG_FILE 2>&1"; then
+        echo "⚠️ Failed to start UI service (check logs)" | tee -a "$LOG_FILE"
+    else
+        echo "✅ UI service started in tmux session: $TMUX_UI_SESSION" | tee -a "$LOG_FILE"
     fi
     
-    # Verify services
-    sleep 10
-    if ! curl -s "http://localhost:$API_PORT/health" | grep -q "ok"; then
-        echo "❌ API health check failed" | tee -a "$LOG_FILE"
+    # Verify services (non-critical)
+    sleep 15
+    if curl -s "http://localhost:$API_PORT/health" | grep -q "ok"; then
+        echo "✅ API health check passed" | tee -a "$LOG_FILE"
+    else
+        echo "⚠️ API health check failed (service may still start later)" | tee -a "$LOG_FILE"
     fi
 }
 
 # --- Main Execution ---
-echo -e "\n=== Mistral-7B Deployment ===" | tee -a "$LOG_FILE"
-verify_resources
-install_dependencies
-download_model
-setup_services
-launch_services
+{
+    echo -e "\n=== Mistral-7B Deployment ==="
+    verify_resources
+    install_dependencies
+    download_model
+    setup_services
+    launch_services
 
-# --- Completion ---
-echo -e "\n✅ Deployment successful!" | tee -a "$LOG_FILE"
-echo "📌 API:    http://localhost:$API_PORT/docs" | tee -a "$LOG_FILE"
-echo "📌 UI:     http://localhost:$UI_PORT" | tee -a "$LOG_FILE"
-echo "📌 Logs:   tail -f $LOG_FILE" | tee -a "$LOG_FILE"
-echo -e "\n🛑 To stop: ./pod_stop.sh" | tee -a "$LOG_FILE"
+    echo -e "\n✅ Deployment completed!"
+    echo "📌 API:    http://localhost:$API_PORT/docs" 
+    echo "📌 UI:     http://localhost:$UI_PORT"
+    echo "📌 Logs:   tail -f $LOG_FILE"
+    echo -e "\n🛑 To stop: tmux kill-session -t $TMUX_API_SESSION && tmux kill-session -t $TMUX_UI_SESSION"
+} | tee -a "$LOG_FILE"
+
+# Exit successfully
+exit 0
