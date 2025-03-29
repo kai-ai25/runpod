@@ -3,7 +3,7 @@ set -euo pipefail
 
 # --- Configuration ---
 HF_TOKEN=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  # Replace with your actual token
-MODEL_NAME="deepseek-ai/deepseek-llm-6.7b"  # Or "deepseek-ai/deepseek-coder-6.7b-instruct"
+MODEL_NAME="deepseek-ai/deepseek-coder-6.7b-instruct"
 LOCAL_MODEL_DIR="/workspace/huggingface/deepseek-6.7b"
 API_PORT=8000
 UI_PORT=7860
