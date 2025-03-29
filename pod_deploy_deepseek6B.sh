@@ -82,6 +82,11 @@ install_dependencies() {
 download_model() {
     echo "🔐 Authenticating and downloading model..." | tee -a "$LOG_FILE"
     
+    if [ -f "$LOCAL_MODEL_DIR/config.json" ]; then
+        echo "Model already downloaded. Skipping download." | tee -a "$LOG_FILE"
+        return 0
+    fi
+    
     # Verify token
     if ! huggingface-cli whoami >> "$LOG_FILE" 2>&1; then
         echo "❌ Invalid Hugging Face token - please update HF_TOKEN" | tee -a "$LOG_FILE"
