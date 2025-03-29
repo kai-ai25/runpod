@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-HF_TOKEN=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  # Replace with your actual token
+HF_TOKEN=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  # Replace with your actual token
 MODEL_NAME="mistralai/Mistral-7B-Instruct-v0.1"
 LOCAL_MODEL_DIR="/workspace/huggingface/mistral-7b-instruct"
 API_PORT=8000
